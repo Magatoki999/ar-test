@@ -97,7 +97,7 @@
             this.modelToPlace.position.y = -boxScaled.min.y;
 
             if (this.statusText) {
-              this.statusText.setText('準備完了！空間をクリックして配置');
+              this.statusText.setText('準備完了！コントローラーで床を指してトリガーを引いてください');
               this.statusText.fontColor = '#00ff00';
             }
           } catch (e) {
@@ -161,6 +161,14 @@
           const floorMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.01 });
           this.pcFloor = new THREE.Mesh(floorGeo, floorMat);
           this.add(this.pcFloor);
+
+          // ★追加: Quest 1のVRモードは現実の床が見えないため、目印となるグリッドを復活させます
+          const grid = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
+          grid.position.y = 0.001; 
+          this.add(grid);
+
+          // ★追加: コントローラーから出るレーザーが、この見えない床に当たるようにシステムに登録します
+          xb.core.input.reticleTargets.push(this.pcFloor);
         }
 
         createInfoPanel() {
@@ -169,20 +177,16 @@
           this.add(this.infoPanel);
 
           const grid = this.infoPanel.addGrid();
-          grid.addRow({ weight: 0.4 }).addText({ text: '🍡 大福 AR プレイスメント', fontSize: 0.08, fontColor: '#ffb7c5' });
+          grid.addRow({ weight: 0.4 }).addText({ text: '🍡 大福 VR プレイスメント', fontSize: 0.08, fontColor: '#ffb7c5' });
           this.statusText = grid.addRow({ weight: 0.6 }).addText({ text: '起動中...', fontSize: 0.045, fontColor: '#ffff00' });
           this.infoPanel.updateLayouts();
         }
 
-        // ==========================================
-        // ★修正: 実機(Android XR, Quest等)専用の配置イベント
-        // Quest 1の古いコントローラーイベントにより確実に対応するため
-        // XR Blocksの `onSelect` イベントを使用します
-        // ==========================================
+        // 実機専用の配置イベント
         onSelect(event) {
           const controller = event.target;
           
-          // コントローラーからのRaycast（交差判定）を強制的に取得
+          // コントローラーからのRaycast（交差判定）
           const intersections = xb.core.input.intersectionsForController.get(controller);
 
           // 1. パネルの誤クリック防止
@@ -196,15 +200,15 @@
 
           let intersection = null;
 
-          // 2. Depth APIを用いた空間配置 (Quest 3やAndroid XRなど、Depth対応デバイス向け)
+          // 2. Depth APIを用いた空間配置 (最新デバイス向け)
           if (xb.core.depth && xb.core.depth.depthMesh) {
             intersection = xb.user.select(xb.core.depth.depthMesh, controller);
           }
           
-          // 3. Depth非対応の場合 (Quest 1など)、仮想の床で判定するフォールバック
+          // 3. Quest 1 などのための仮想床（pcFloor）への配置判定
           if (!intersection) {
             if (intersections && intersections.length > 0) {
-               // XRBlocksが標準で用意している仮想の床(Reticle)の交差を使う
+               // レーザーが仮想の床（またはグリッド）に当たった場所を取得
                intersection = intersections[0];
             }
           }
@@ -218,18 +222,19 @@
       document.addEventListener('DOMContentLoaded', async () => {
         const options = new xb.Options();
         options.enableUI();
-        options.enableHands();
-        options.reticles.enabled = true;
-        // Depth Meshを無効にして、古いデバイス(Quest 1)との互換性を高める
-        // Quest 1はDepth API(深度センサーによる空間のメッシュ化)に非対応の可能性が高いため
-        // options.depth = new xb.DepthOptions(xb.xrDepthMeshOptions); 
+        
+        // ========================================================
+        // ★修正: Quest 1（古いデバイス）で起動させるための超重要設定★
+        // ========================================================
+        // Quest 1がサポートしていない高度なAR機能（ハンドトラッキングや平面検出）
+        // を要求するとエラーでボタンが反応しなくなるため、すべて無効にします。
+        
+        // options.enableHands(); // ハンドトラッキングを無効化
+        options.reticles.enabled = false; // AR平面検出を無効化
+        // options.depth は既に無効化済み
         
         await xb.init(options);
         
-        if (typeof xb.showReticleOnDepthMesh === 'function') {
-          xb.showReticleOnDepthMesh(true);
-        }
-
         xb.add(new SimplePlacer());
       });
     </script>
