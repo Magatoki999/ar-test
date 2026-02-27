@@ -1,178 +1,120 @@
 <!doctype html>
 <html lang="ja">
   <head>
-    <title>Legacy VR Placer</title>
+    <title>A-Frame VR Placer</title>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <!-- 安定性の高い A-Frame 1.4.2 を読み込み -->
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script>
+      // 1. モデルのサイズを約20cmに自動調整し、底面を床に合わせるプログラム
+      AFRAME.registerComponent('auto-scale-position', {
+        init: function () {
+          this.el.addEventListener('model-loaded', () => {
+            const object3D = this.el.getObject3D('mesh');
+            if (object3D) {
+              const box = new THREE.Box3().setFromObject(object3D);
+              const size = box.getSize(new THREE.Vector3());
+              const maxDim = Math.max(size.x, size.y, size.z);
+              
+              // 最大寸法が約0.2(20cm)になるようにスケールを計算
+              const scale = 0.2 / maxDim;
+              this.el.setAttribute('scale', `${scale} ${scale} ${scale}`);
+              
+              // スケール適用後に高さを計算してY位置（上下）を補正
+              object3D.scale.set(scale, scale, scale);
+              object3D.updateMatrixWorld(true);
+              
+              const scaledBox = new THREE.Box3().setFromObject(object3D);
+              const currentPos = this.el.getAttribute('position');
+              this.el.setAttribute('position', {
+                x: currentPos.x,
+                y: currentPos.y - scaledBox.min.y,
+                z: currentPos.z
+              });
+            }
+          });
+        }
+      });
+
+      // 2. コントローラーのトリガーを引いた時に大福を配置するプログラム
+      AFRAME.registerComponent('daifuku-spawner', {
+        init: function () {
+          this.el.addEventListener('triggerdown', (evt) => {
+            const raycaster = this.el.components.raycaster;
+            if (!raycaster) return;
+            
+            // レーザーが見えない床(#floor)に当たっているか確認
+            const intersection = raycaster.getIntersection(document.querySelector('#floor'));
+            if (intersection) {
+              // 大福のクローンを作成して配置
+              const daifuku = document.createElement('a-entity');
+              daifuku.setAttribute('gltf-model', '#daifuku-model');
+              daifuku.setAttribute('position', intersection.point);
+              daifuku.setAttribute('auto-scale-position', ''); // サイズ自動調整を発動
+              
+              // カメラ（自分）の方を向かせる
+              const camera = document.querySelector('[camera]');
+              if (camera) {
+                const cameraPos = camera.object3D.position;
+                const angle = Math.atan2(cameraPos.x - intersection.point.x, cameraPos.z - intersection.point.z);
+                daifuku.setAttribute('rotation', `0 ${angle * 180 / Math.PI} 0`);
+              }
+              
+              document.querySelector('a-scene').appendChild(daifuku);
+            }
+          });
+        }
+      });
+    </script>
     <style>
-      body { margin: 0; overflow: hidden; background-color: #222; }
-      #info {
+      #ui-overlay {
         position: absolute;
-        top: 10%;
+        top: 20px;
         width: 100%;
         text-align: center;
         color: white;
         font-family: sans-serif;
-        z-index: 100;
         font-size: 1.5rem;
-        line-height: 1.5;
-        text-shadow: 1px 1px 2px black;
+        z-index: 100;
+        pointer-events: none;
+        text-shadow: 2px 2px 4px black;
       }
-      #error-log { color: #ff6666; font-size: 1rem; margin-top: 20px; word-break: break-all; padding: 0 10%; }
-      #status { font-weight: bold; color: #ffff00; }
     </style>
-    <script>
-      // プログラムが動く前に、どんなエラーでも最優先で画面に表示するおまじない
-      window.addEventListener('error', function(event) {
-        var log = document.getElementById('error-log');
-        if(log) log.innerHTML += `[致命的エラー] ${event.message}<br/>`;
-      });
-      window.addEventListener('unhandledrejection', function(event) {
-        var log = document.getElementById('error-log');
-        if(log) log.innerHTML += `[非同期エラー] ${event.reason}<br/>`;
-      });
-    </script>
   </head>
   <body>
-    <div id="info">
-      🍡 大福 VR (Quest 1 互換モード)<br/>
-      <span id="status">システム起動前...</span>
-      <div id="error-log"></div>
+    <!-- 画面上部のメッセージ -->
+    <div id="ui-overlay">
+      🍡 大福 VR (A-Frame 安定版)<br/>
+      <span style="font-size: 1rem; color: #00ff00;">右下の「VR」アイコンを押してください</span>
     </div>
-    <script type="module">
-      // 現代の機能(importmap)を廃止し、直接古い安定版(v0.150.0)を読み込む
-      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.module.js';
-      import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.150.0/examples/jsm/webxr/VRButton.js';
-      import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.150.0/examples/jsm/loaders/GLTFLoader.js';
-      import * as SkeletonUtils from 'https://cdn.jsdelivr.net/npm/three@0.150.0/examples/jsm/utils/SkeletonUtils.js';
 
-      let camera, scene, renderer;
-      let controller1, controller2;
-      let raycaster;
-      let daifukuModel = null;
-      let floorMesh = null;
-      let statusText = document.getElementById('status');
+    <!-- VR空間の定義 -->
+    <a-scene background="color: #333333" webxr="referenceSpaceType: local-floor">
+      
+      <!-- 3Dモデルの事前読み込み -->
+      <a-assets>
+        <a-asset-item id="daifuku-model" src="daifuku2.glb"></a-asset-item>
+      </a-assets>
 
-      try {
-        statusText.innerHTML = "モジュール読込成功。初期化中...";
-        init();
-        animate();
-      } catch (e) {
-        document.getElementById('error-log').innerHTML += `[Init Error] ${e.message}<br/>`;
-      }
+      <!-- プレイヤー（カメラと両手のコントローラー） -->
+      <a-entity id="rig">
+        <a-camera position="0 1.6 0"></a-camera>
+        <!-- 両手にレーザーポインターと配置機能を付与 -->
+        <a-entity laser-controls="hand: left" raycaster="objects: #floor" daifuku-spawner></a-entity>
+        <a-entity laser-controls="hand: right" raycaster="objects: #floor" daifuku-spawner></a-entity>
+      </a-entity>
 
-      function init() {
-        scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x333333); 
+      <!-- レーザーの当たり判定用の見えない床 -->
+      <a-plane id="floor" rotation="-90 0 0" width="20" height="20" visible="false"></a-plane>
+      
+      <!-- 視覚的な目印となる網目模様の床 -->
+      <a-entity geometry="primitive: plane; width: 20; height: 20" rotation="-90 0 0" material="color: #888888; wireframe: true"></a-entity>
 
-        camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
-        camera.position.set(0, 1.6, 3);
+      <!-- 照明 -->
+      <a-light type="ambient" color="#ffffff" intensity="0.8"></a-light>
+      <a-light type="directional" color="#ffffff" intensity="1.0" position="-1 2 1"></a-light>
 
-        const ambientLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
-        scene.add(ambientLight);
-        const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
-        dirLight.position.set(1, 3, 2);
-        scene.add(dirLight);
-
-        const floorGeo = new THREE.PlaneGeometry(20, 20);
-        floorGeo.rotateX(-Math.PI / 2);
-        const floorMat = new THREE.MeshBasicMaterial({ color: 0x222222, visible: false }); 
-        floorMesh = new THREE.Mesh(floorGeo, floorMat);
-        scene.add(floorMesh);
-
-        const grid = new THREE.GridHelper(20, 40, 0x888888, 0x444444);
-        scene.add(grid);
-
-        statusText.innerHTML = "大福モデル読込中...";
-
-        const loader = new GLTFLoader();
-        loader.load('daifuku2.glb', (gltf) => {
-          daifukuModel = gltf.scene;
-          const box = new THREE.Box3().setFromObject(daifukuModel);
-          const size = box.getSize(new THREE.Vector3());
-          const scale = 0.2 / Math.max(size.x, size.y, size.z);
-          daifukuModel.scale.setScalar(scale);
-          
-          const boxScaled = new THREE.Box3().setFromObject(daifukuModel);
-          daifukuModel.position.y = -boxScaled.min.y;
-          
-          statusText.innerHTML = "✅ 準備完了！画面下の「ENTER VR」を押してください";
-          statusText.style.color = "#00ff00";
-        }, undefined, (error) => {
-          throw new Error("モデル読込失敗 (" + error.message + ")");
-        });
-
-        renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.xr.enabled = true;
-        document.body.appendChild(renderer.domElement);
-
-        document.body.appendChild(VRButton.createButton(renderer));
-
-        controller1 = renderer.xr.getController(0);
-        controller1.addEventListener('select', onSelect);
-        scene.add(controller1);
-
-        controller2 = renderer.xr.getController(1);
-        controller2.addEventListener('select', onSelect);
-        scene.add(controller2);
-
-        const boxGeo = new THREE.BoxGeometry(0.05, 0.05, 0.05);
-        const boxMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const controllerMesh = new THREE.Mesh(boxGeo, boxMat);
-        controller1.add(controllerMesh.clone());
-        controller2.add(controllerMesh.clone());
-
-        const geometry = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(0, 0, 0),
-          new THREE.Vector3(0, 0, -1)
-        ]);
-        const line = new THREE.Line(geometry);
-        line.scale.z = 5; 
-        controller1.add(line.clone());
-        controller2.add(line.clone());
-
-        raycaster = new THREE.Raycaster();
-        window.addEventListener('resize', onWindowResize);
-      }
-
-      function onWindowResize() {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-      }
-
-      function onSelect(event) {
-        if (!daifukuModel) return;
-        const controller = event.target;
-        const tempMatrix = new THREE.Matrix4();
-        tempMatrix.identity().extractRotation(controller.matrixWorld);
-
-        raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-
-        const intersects = raycaster.intersectObject(floorMesh);
-        if (intersects.length > 0) {
-          const clonedModel = SkeletonUtils.clone(daifukuModel);
-          clonedModel.position.copy(intersects[0].point);
-          
-          const cameraPos = new THREE.Vector3();
-          camera.getWorldPosition(cameraPos);
-          cameraPos.y = clonedModel.position.y;
-          clonedModel.lookAt(cameraPos);
-          
-          scene.add(clonedModel);
-        }
-      }
-
-      function animate() {
-        renderer.setAnimationLoop(render);
-      }
-
-      function render() {
-        renderer.render(scene, camera);
-      }
-    </script>
+    </a-scene>
   </body>
 </html>
