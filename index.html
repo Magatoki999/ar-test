@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <title>Simple AR Placer | XR Blocks</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <script>
+      window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.10.0/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.10.0/build/addons/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from 'three';
+      import * as xb from 'xrblocks';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+      import 'xrblocks/addons/simulator/SimulatorAddons.js';
+
+      class SimplePlacer extends xb.Script {
+        async init() {
+          this.addLights();
+          this.createPCFloor(); // PC用の仮想の床
+          this.createInfoPanel();
+          
+          this.modelToPlace = null;
+          
+          // ==========================================
+          // ★最強のPCシミュレーター向けクリック(Raycast)処理★
+          // XR Blocksのシステムをバイパスし、ブラウザのマウス操作から直接判定します
+          // ==========================================
+          this.pointerDownPos = new THREE.Vector2();
+          
+          window.addEventListener('pointerdown', (e) => {
+            this.pointerDownPos.set(e.clientX, e.clientY); // クリックした瞬間を記録
+          });
+          
+          window.addEventListener('pointerup', (e) => {
+            // XRセッション中（実機でAR起動中）は標準のonSelectStartに任せるため無視
+            if (xb.core.renderer && xb.core.renderer.xr && xb.core.renderer.xr.isPresenting) return;
+            
+            // マウスの移動量が大きい場合は「視点を回すためのドラッグ」とみなして配置をキャンセル
+            const dx = e.clientX - this.pointerDownPos.x;
+            const dy = e.clientY - this.pointerDownPos.y;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
+
+            // マウス座標をThree.js用に計算
+            const pointer = new THREE.Vector2();
+            pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+            // 直接レイを飛ばす！
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(pointer, xb.core.camera);
+
+            // 1. パネルに当たっているかチェック
+            if (this.infoPanel) {
+              const uiHits = raycaster.intersectObject(this.infoPanel, true);
+              if (uiHits.length > 0) return; // パネルをクリックしていたらキャンセル
+            }
+
+            // 2. 床に当たっているかチェックして配置！
+            if (this.pcFloor) {
+              const floorHits = raycaster.intersectObject(this.pcFloor);
+              if (floorHits.length > 0) {
+                this.placeModel(floorHits[0]);
+              }
+            }
+          });
+
+          // ==========================================
+          // 本物の「daifuku2.glb」を読み込む処理
+          // ==========================================
+          try {
+            const loader = new GLTFLoader();
+            const gltf = await loader.loadAsync('daifuku2.glb');
+            this.modelToPlace = gltf.scene;
+            
+            // サイズを約20cm(0.2m)に調整
+            const box = new THREE.Box3().setFromObject(this.modelToPlace);
+            const size = box.getSize(new THREE.Vector3());
+            const scale = 0.2 / Math.max(size.x, size.y, size.z);
+            this.modelToPlace.scale.setScalar(scale);
+            
+            // 底面をY=0に合わせる
+            const boxScaled = new THREE.Box3().setFromObject(this.modelToPlace);
+            this.modelToPlace.position.y = -boxScaled.min.y;
+
+            if (this.statusText) {
+              this.statusText.setText('準備完了！空間をクリックして配置');
+              this.statusText.fontColor = '#00ff00';
+            }
+          } catch (e) {
+            console.error("モデルの読み込みに失敗しました:", e);
+            if (this.statusText) {
+              this.statusText.setText('エラー: daifuku2.glb が見つかりません');
+              this.statusText.fontColor = '#ff0000';
+            }
+          }
+        }
+
+        // ==========================================
+        // モデルを配置する共通メソッド
+        // ==========================================
+        placeModel(intersection) {
+          if (!this.modelToPlace) return;
+
+          // ==========================================
+          // ★ 追加：壁への配置を防止する処理（法線の確認）
+          // ==========================================
+          let normal = new THREE.Vector3(0, 1, 0); // デフォルトは上向き
+
+          // クリックした面がどちらを向いているか（法線ベクトル）を取得
+          if (intersection.face && intersection.object) {
+            normal.copy(intersection.face.normal);
+            const normalMatrix = new THREE.Matrix3().getNormalMatrix(intersection.object.matrixWorld);
+            normal.applyMatrix3(normalMatrix).normalize();
+          } else if (intersection.normal) {
+            normal.copy(intersection.normal);
+          }
+
+          // Y軸成分（上下方向の向き）をチェック。
+          // 1.0なら完全に平らな床。0なら完全な壁。0.7（約45度の傾き）未満は壁とみなす。
+          if (normal.y < 0.7) {
+            if (this.statusText) {
+              this.statusText.setText('⚠️ 壁です！平らな面に配置してください');
+              this.statusText.fontColor = '#ff6666';
+            }
+            return; // 壁なのでここで処理を終了（配置させない）
+          }
+
+          // 配置成功のメッセージ
+          if (this.statusText) {
+            this.statusText.setText('🍡 配置しました！');
+            this.statusText.fontColor = '#00ff00';
+          }
+          
+          // SkeletonUtilsで安全にモデルを複製
+          const clonedModel = SkeletonUtils.clone(this.modelToPlace);
+          const wrapper = new THREE.Group();
+          wrapper.add(clonedModel);
+          
+          // クリックした位置に配置し、ユーザーの方を向かせる
+          if (xb.placeObjectAtIntersectionFacingTarget) {
+            this.add(xb.placeObjectAtIntersectionFacingTarget(wrapper, intersection, xb.core.camera));
+          } else {
+            wrapper.position.copy(intersection.point);
+            this.add(wrapper);
+          }
+        }
+
+        addLights() {
+          const ambientLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
+          this.add(ambientLight);
+          const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+          dirLight.position.set(1, 3, 2);
+          this.add(dirLight);
+        }
+
+        createPCFloor() {
+          // 当たり判定専用のうっすら透明な床
+          const floorGeo = new THREE.PlaneGeometry(20, 20);
+          floorGeo.rotateX(-Math.PI / 2);
+          const floorMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.01 });
+          this.pcFloor = new THREE.Mesh(floorGeo, floorMat);
+          this.add(this.pcFloor);
+
+          // 視覚的な目印としてのグリッドは非表示(コメントアウト)にしました
+          // const grid = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
+          // grid.position.y = 0.001; 
+          // this.add(grid);
+        }
+
+        createInfoPanel() {
+          this.infoPanel = new xb.SpatialPanel({ width: 1.2, height: 0.4, backgroundColor: '#1a1a1acc' });
+          this.infoPanel.position.set(0, 1.4, -1.2);
+          this.add(this.infoPanel);
+
+          const grid = this.infoPanel.addGrid();
+          grid.addRow({ weight: 0.4 }).addText({ text: '🍡 大福 AR プレイスメント', fontSize: 0.08, fontColor: '#ffb7c5' });
+          this.statusText = grid.addRow({ weight: 0.6 }).addText({ text: '起動中...', fontSize: 0.045, fontColor: '#ffff00' });
+          this.infoPanel.updateLayouts();
+        }
+
+        // 実機(Android XR等)専用の配置イベント
+        onSelectStart(event) {
+          const controller = event.target;
+          const intersections = xb.core.input.intersectionsForController.get(controller);
+
+          // パネルの誤クリック防止
+          if (intersections && intersections.length > 0) {
+            let hitUI = false;
+            intersections[0].object.traverseAncestors((node) => {
+              if (node === this.infoPanel) hitUI = true;
+            });
+            if (hitUI) return; 
+          }
+
+          // Depth APIを用いた空間配置
+          let intersection = null;
+          if (xb.core.depth && xb.core.depth.depthMesh) {
+            intersection = xb.user.select(xb.core.depth.depthMesh, controller);
+          }
+          
+          if (intersection) {
+            this.placeModel(intersection);
+          }
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', async () => {
+        const options = new xb.Options();
+        options.enableUI();
+        options.enableHands();
+        options.reticles.enabled = true;
+        options.depth = new xb.DepthOptions(xb.xrDepthMeshOptions);
+        
+        await xb.init(options);
+        
+        if (typeof xb.showReticleOnDepthMesh === 'function') {
+          xb.showReticleOnDepthMesh(true);
+        }
+
+        xb.add(new SimplePlacer());
+      });
+    </script>
+  </body>
+</html>
