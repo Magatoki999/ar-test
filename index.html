@@ -1,242 +1,205 @@
 <!doctype html>
 <html lang="ja">
   <head>
-    <title>Simple AR Placer | XR Blocks</title>
+    <title>Simple VR Placer</title>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
-    <script>
-      window.litDisableBundleWarning = true;
-    </script>
+    <style>
+      body { margin: 0; overflow: hidden; background-color: #222; }
+      #info {
+        position: absolute;
+        top: 20px;
+        width: 100%;
+        text-align: center;
+        color: white;
+        font-family: sans-serif;
+        pointer-events: none;
+        z-index: 100;
+        font-size: 1.2rem;
+      }
+    </style>
     <script type="importmap">
       {
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
-          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
-          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
-          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
-          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
-          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
-          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
-          "lit/": "https://esm.run/lit@3/",
-          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.10.0/build/xrblocks.js",
-          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.10.0/build/addons/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
         }
       }
     </script>
   </head>
   <body>
+    <div id="info">🍡 大福 VR プレイスメント<br/>モデル読込中...</div>
     <script type="module">
       import * as THREE from 'three';
-      import * as xb from 'xrblocks';
+      import { VRButton } from 'three/addons/webxr/VRButton.js';
+      import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
       import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-      import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
-      class SimplePlacer extends xb.Script {
-        async init() {
-          this.addLights();
-          this.createPCFloor();
-          this.createInfoPanel();
+      let camera, scene, renderer;
+      let controller1, controller2;
+      let controllerGrip1, controllerGrip2;
+      let raycaster;
+      
+      let daifukuModel = null;
+      let floorMesh = null;
+      let infoText = document.getElementById('info');
+
+      init();
+      animate();
+
+      function init() {
+        // ==========================================
+        // 1. 空間（シーン）の基本設定
+        // ==========================================
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222222); // 暗いグレーの背景
+
+        camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 1.6, 3);
+
+        const ambientLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
+        scene.add(ambientLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+        dirLight.position.set(1, 3, 2);
+        scene.add(dirLight);
+
+        // ==========================================
+        // 2. 仮想の床とグリッド（目印）を作成
+        // ==========================================
+        const floorGeo = new THREE.PlaneGeometry(20, 20);
+        floorGeo.rotateX(-Math.PI / 2);
+        const floorMat = new THREE.MeshBasicMaterial({ color: 0x222222, visible: false }); // レーザー判定用（透明）
+        floorMesh = new THREE.Mesh(floorGeo, floorMat);
+        scene.add(floorMesh);
+
+        // 床の網目模様
+        const grid = new THREE.GridHelper(20, 40, 0x888888, 0x444444);
+        scene.add(grid);
+
+        // ==========================================
+        // 3. 大福モデルの読み込み
+        // ==========================================
+        const loader = new GLTFLoader();
+        loader.load('daifuku2.glb', (gltf) => {
+          daifukuModel = gltf.scene;
           
-          this.modelToPlace = null;
+          // サイズを約20cmに調整
+          const box = new THREE.Box3().setFromObject(daifukuModel);
+          const size = box.getSize(new THREE.Vector3());
+          const scale = 0.2 / Math.max(size.x, size.y, size.z);
+          daifukuModel.scale.setScalar(scale);
           
-          // ==========================================
-          // PCシミュレーター向けクリック処理
-          // ==========================================
-          this.pointerDownPos = new THREE.Vector2();
+          // 底面をY=0に合わせる
+          const boxScaled = new THREE.Box3().setFromObject(daifukuModel);
+          daifukuModel.position.y = -boxScaled.min.y;
           
-          window.addEventListener('pointerdown', (e) => {
-            this.pointerDownPos.set(e.clientX, e.clientY);
-          });
+          infoText.innerHTML = "🍡 準備完了！<br/>「ENTER VR」を押して、トリガーで配置してください";
+        }, undefined, (error) => {
+          console.error(error);
+          infoText.innerHTML = "⚠️ daifuku2.glb の読み込みに失敗しました";
+          infoText.style.color = "#ff6666";
+        });
+
+        // ==========================================
+        // 4. レンダラー（描画エンジン）とVRボタンの設定
+        // ==========================================
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        
+        // ★重要: VRモードを有効化★
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Three.js公式の確実なVR起動ボタンを追加
+        document.body.appendChild(VRButton.createButton(renderer));
+
+        // ==========================================
+        // 5. VRコントローラーとレーザーポインターの設定
+        // ==========================================
+        controller1 = renderer.xr.getController(0);
+        controller1.addEventListener('select', onSelect); // トリガーを引いた時のイベント
+        scene.add(controller1);
+
+        controller2 = renderer.xr.getController(1);
+        controller2.addEventListener('select', onSelect);
+        scene.add(controller2);
+
+        // コントローラーの3Dモデル（Questのコントローラーの形）を表示
+        const controllerModelFactory = new XRControllerModelFactory();
+        controllerGrip1 = renderer.xr.getControllerGrip(0);
+        controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
+        scene.add(controllerGrip1);
+
+        controllerGrip2 = renderer.xr.getControllerGrip(1);
+        controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
+        scene.add(controllerGrip2);
+
+        // コントローラーの先から出るレーザーの線を描画
+        const geometry = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0),
+          new THREE.Vector3(0, 0, -1)
+        ]);
+        const line = new THREE.Line(geometry);
+        line.name = 'line';
+        line.scale.z = 5; // レーザーの長さ
+
+        controller1.add(line.clone());
+        controller2.add(line.clone());
+
+        raycaster = new THREE.Raycaster();
+        window.addEventListener('resize', onWindowResize);
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      // ==========================================
+      // 6. トリガーを引いた時の配置処理
+      // ==========================================
+      function onSelect(event) {
+        if (!daifukuModel) return;
+
+        const controller = event.target;
+        const tempMatrix = new THREE.Matrix4();
+        tempMatrix.identity().extractRotation(controller.matrixWorld);
+
+        // コントローラーの位置からレーザーを飛ばす
+        raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+        raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+        // 見えない床(floorMesh)との交差判定
+        const intersects = raycaster.intersectObject(floorMesh);
+
+        if (intersects.length > 0) {
+          const hit = intersects[0];
           
-          window.addEventListener('pointerup', (e) => {
-            if (xb.core.renderer && xb.core.renderer.xr && xb.core.renderer.xr.isPresenting) return;
-            
-            const dx = e.clientX - this.pointerDownPos.x;
-            const dy = e.clientY - this.pointerDownPos.y;
-            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
-
-            const pointer = new THREE.Vector2();
-            pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
-            pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
-
-            const raycaster = new THREE.Raycaster();
-            raycaster.setFromCamera(pointer, xb.core.camera);
-
-            if (this.infoPanel) {
-              const uiHits = raycaster.intersectObject(this.infoPanel, true);
-              if (uiHits.length > 0) return;
-            }
-
-            if (this.pcFloor) {
-              const floorHits = raycaster.intersectObject(this.pcFloor);
-              if (floorHits.length > 0) {
-                this.placeModel(floorHits[0]);
-              }
-            }
-          });
-
-          // ==========================================
-          // 本物の「daifuku2.glb」を読み込む処理
-          // ==========================================
-          try {
-            const loader = new GLTFLoader();
-            const gltf = await loader.loadAsync('daifuku2.glb');
-            this.modelToPlace = gltf.scene;
-            
-            // サイズを約20cm(0.2m)に調整
-            const box = new THREE.Box3().setFromObject(this.modelToPlace);
-            const size = box.getSize(new THREE.Vector3());
-            const scale = 0.2 / Math.max(size.x, size.y, size.z);
-            this.modelToPlace.scale.setScalar(scale);
-            
-            // 底面をY=0に合わせる
-            const boxScaled = new THREE.Box3().setFromObject(this.modelToPlace);
-            this.modelToPlace.position.y = -boxScaled.min.y;
-
-            if (this.statusText) {
-              this.statusText.setText('準備完了！コントローラーで床を指してトリガーを引いてください');
-              this.statusText.fontColor = '#00ff00';
-            }
-          } catch (e) {
-            console.error("モデルの読み込みに失敗しました:", e);
-            if (this.statusText) {
-              this.statusText.setText('エラー: daifuku2.glb が見つかりません');
-              this.statusText.fontColor = '#ff0000';
-            }
-          }
-        }
-
-        placeModel(intersection) {
-          if (!this.modelToPlace) return;
-
-          let normal = new THREE.Vector3(0, 1, 0);
-
-          if (intersection.face && intersection.object) {
-            normal.copy(intersection.face.normal);
-            const normalMatrix = new THREE.Matrix3().getNormalMatrix(intersection.object.matrixWorld);
-            normal.applyMatrix3(normalMatrix).normalize();
-          } else if (intersection.normal) {
-            normal.copy(intersection.normal);
-          }
-
-          if (normal.y < 0.7) {
-            if (this.statusText) {
-              this.statusText.setText('⚠️ 壁です！平らな面に配置してください');
-              this.statusText.fontColor = '#ff6666';
-            }
-            return;
-          }
-
-          if (this.statusText) {
-            this.statusText.setText('🍡 配置しました！');
-            this.statusText.fontColor = '#00ff00';
-          }
+          // 大福を複製
+          const clonedModel = SkeletonUtils.clone(daifukuModel);
+          clonedModel.position.copy(hit.point);
           
-          const clonedModel = SkeletonUtils.clone(this.modelToPlace);
-          const wrapper = new THREE.Group();
-          wrapper.add(clonedModel);
+          // 大福を自分（カメラ）の方へ向かせる
+          const cameraPos = new THREE.Vector3();
+          camera.getWorldPosition(cameraPos);
+          cameraPos.y = clonedModel.position.y; // 上下には傾かないようにする
+          clonedModel.lookAt(cameraPos);
           
-          if (xb.placeObjectAtIntersectionFacingTarget) {
-            this.add(xb.placeObjectAtIntersectionFacingTarget(wrapper, intersection, xb.core.camera));
-          } else {
-            wrapper.position.copy(intersection.point);
-            this.add(wrapper);
-          }
-        }
-
-        addLights() {
-          const ambientLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
-          this.add(ambientLight);
-          const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
-          dirLight.position.set(1, 3, 2);
-          this.add(dirLight);
-        }
-
-        createPCFloor() {
-          const floorGeo = new THREE.PlaneGeometry(20, 20);
-          floorGeo.rotateX(-Math.PI / 2);
-          const floorMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.01 });
-          this.pcFloor = new THREE.Mesh(floorGeo, floorMat);
-          this.add(this.pcFloor);
-
-          // ★追加: Quest 1のVRモードは現実の床が見えないため、目印となるグリッドを復活させます
-          const grid = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
-          grid.position.y = 0.001; 
-          this.add(grid);
-
-          // ★追加: コントローラーから出るレーザーが、この見えない床に当たるようにシステムに登録します
-          xb.core.input.reticleTargets.push(this.pcFloor);
-        }
-
-        createInfoPanel() {
-          this.infoPanel = new xb.SpatialPanel({ width: 1.2, height: 0.4, backgroundColor: '#1a1a1acc' });
-          this.infoPanel.position.set(0, 1.4, -1.2);
-          this.add(this.infoPanel);
-
-          const grid = this.infoPanel.addGrid();
-          grid.addRow({ weight: 0.4 }).addText({ text: '🍡 大福 VR プレイスメント', fontSize: 0.08, fontColor: '#ffb7c5' });
-          this.statusText = grid.addRow({ weight: 0.6 }).addText({ text: '起動中...', fontSize: 0.045, fontColor: '#ffff00' });
-          this.infoPanel.updateLayouts();
-        }
-
-        // 実機専用の配置イベント
-        onSelect(event) {
-          const controller = event.target;
-          
-          // コントローラーからのRaycast（交差判定）
-          const intersections = xb.core.input.intersectionsForController.get(controller);
-
-          // 1. パネルの誤クリック防止
-          if (intersections && intersections.length > 0) {
-            let hitUI = false;
-            intersections[0].object.traverseAncestors((node) => {
-              if (node === this.infoPanel) hitUI = true;
-            });
-            if (hitUI) return; 
-          }
-
-          let intersection = null;
-
-          // 2. Depth APIを用いた空間配置 (最新デバイス向け)
-          if (xb.core.depth && xb.core.depth.depthMesh) {
-            intersection = xb.user.select(xb.core.depth.depthMesh, controller);
-          }
-          
-          // 3. Quest 1 などのための仮想床（pcFloor）への配置判定
-          if (!intersection) {
-            if (intersections && intersections.length > 0) {
-               // レーザーが仮想の床（またはグリッド）に当たった場所を取得
-               intersection = intersections[0];
-            }
-          }
-          
-          if (intersection) {
-            this.placeModel(intersection);
-          }
+          scene.add(clonedModel);
         }
       }
 
-      document.addEventListener('DOMContentLoaded', async () => {
-        const options = new xb.Options();
-        options.enableUI();
-        
-        // ========================================================
-        // ★修正: Quest 1（古いデバイス）で起動させるための超重要設定★
-        // ========================================================
-        // Quest 1がサポートしていない高度なAR機能（ハンドトラッキングや平面検出）
-        // を要求するとエラーでボタンが反応しなくなるため、すべて無効にします。
-        
-        // options.enableHands(); // ハンドトラッキングを無効化
-        options.reticles.enabled = false; // AR平面検出を無効化
-        // options.depth は既に無効化済み
-        
-        await xb.init(options);
-        
-        xb.add(new SimplePlacer());
-      });
+      function animate() {
+        renderer.setAnimationLoop(render);
+      }
+
+      function render() {
+        renderer.render(scene, camera);
+      }
     </script>
   </body>
 </html>
