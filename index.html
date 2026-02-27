@@ -37,46 +37,39 @@
       class SimplePlacer extends xb.Script {
         async init() {
           this.addLights();
-          this.createPCFloor(); // PC用の仮想の床
+          this.createPCFloor();
           this.createInfoPanel();
           
           this.modelToPlace = null;
           
           // ==========================================
-          // ★最強のPCシミュレーター向けクリック(Raycast)処理★
-          // XR Blocksのシステムをバイパスし、ブラウザのマウス操作から直接判定します
+          // PCシミュレーター向けクリック処理
           // ==========================================
           this.pointerDownPos = new THREE.Vector2();
           
           window.addEventListener('pointerdown', (e) => {
-            this.pointerDownPos.set(e.clientX, e.clientY); // クリックした瞬間を記録
+            this.pointerDownPos.set(e.clientX, e.clientY);
           });
           
           window.addEventListener('pointerup', (e) => {
-            // XRセッション中（実機でAR起動中）は標準のonSelectStartに任せるため無視
             if (xb.core.renderer && xb.core.renderer.xr && xb.core.renderer.xr.isPresenting) return;
             
-            // マウスの移動量が大きい場合は「視点を回すためのドラッグ」とみなして配置をキャンセル
             const dx = e.clientX - this.pointerDownPos.x;
             const dy = e.clientY - this.pointerDownPos.y;
             if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
 
-            // マウス座標をThree.js用に計算
             const pointer = new THREE.Vector2();
             pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
             pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
 
-            // 直接レイを飛ばす！
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(pointer, xb.core.camera);
 
-            // 1. パネルに当たっているかチェック
             if (this.infoPanel) {
               const uiHits = raycaster.intersectObject(this.infoPanel, true);
-              if (uiHits.length > 0) return; // パネルをクリックしていたらキャンセル
+              if (uiHits.length > 0) return;
             }
 
-            // 2. 床に当たっているかチェックして配置！
             if (this.pcFloor) {
               const floorHits = raycaster.intersectObject(this.pcFloor);
               if (floorHits.length > 0) {
@@ -116,18 +109,11 @@
           }
         }
 
-        // ==========================================
-        // モデルを配置する共通メソッド
-        // ==========================================
         placeModel(intersection) {
           if (!this.modelToPlace) return;
 
-          // ==========================================
-          // ★ 追加：壁への配置を防止する処理（法線の確認）
-          // ==========================================
-          let normal = new THREE.Vector3(0, 1, 0); // デフォルトは上向き
+          let normal = new THREE.Vector3(0, 1, 0);
 
-          // クリックした面がどちらを向いているか（法線ベクトル）を取得
           if (intersection.face && intersection.object) {
             normal.copy(intersection.face.normal);
             const normalMatrix = new THREE.Matrix3().getNormalMatrix(intersection.object.matrixWorld);
@@ -136,28 +122,23 @@
             normal.copy(intersection.normal);
           }
 
-          // Y軸成分（上下方向の向き）をチェック。
-          // 1.0なら完全に平らな床。0なら完全な壁。0.7（約45度の傾き）未満は壁とみなす。
           if (normal.y < 0.7) {
             if (this.statusText) {
               this.statusText.setText('⚠️ 壁です！平らな面に配置してください');
               this.statusText.fontColor = '#ff6666';
             }
-            return; // 壁なのでここで処理を終了（配置させない）
+            return;
           }
 
-          // 配置成功のメッセージ
           if (this.statusText) {
             this.statusText.setText('🍡 配置しました！');
             this.statusText.fontColor = '#00ff00';
           }
           
-          // SkeletonUtilsで安全にモデルを複製
           const clonedModel = SkeletonUtils.clone(this.modelToPlace);
           const wrapper = new THREE.Group();
           wrapper.add(clonedModel);
           
-          // クリックした位置に配置し、ユーザーの方を向かせる
           if (xb.placeObjectAtIntersectionFacingTarget) {
             this.add(xb.placeObjectAtIntersectionFacingTarget(wrapper, intersection, xb.core.camera));
           } else {
@@ -175,17 +156,11 @@
         }
 
         createPCFloor() {
-          // 当たり判定専用のうっすら透明な床
           const floorGeo = new THREE.PlaneGeometry(20, 20);
           floorGeo.rotateX(-Math.PI / 2);
           const floorMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.01 });
           this.pcFloor = new THREE.Mesh(floorGeo, floorMat);
           this.add(this.pcFloor);
-
-          // 視覚的な目印としてのグリッドは非表示(コメントアウト)にしました
-          // const grid = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
-          // grid.position.y = 0.001; 
-          // this.add(grid);
         }
 
         createInfoPanel() {
@@ -199,12 +174,18 @@
           this.infoPanel.updateLayouts();
         }
 
-        // 実機(Android XR等)専用の配置イベント
-        onSelectStart(event) {
+        // ==========================================
+        // ★修正: 実機(Android XR, Quest等)専用の配置イベント
+        // Quest 1の古いコントローラーイベントにより確実に対応するため
+        // XR Blocksの `onSelect` イベントを使用します
+        // ==========================================
+        onSelect(event) {
           const controller = event.target;
+          
+          // コントローラーからのRaycast（交差判定）を強制的に取得
           const intersections = xb.core.input.intersectionsForController.get(controller);
 
-          // パネルの誤クリック防止
+          // 1. パネルの誤クリック防止
           if (intersections && intersections.length > 0) {
             let hitUI = false;
             intersections[0].object.traverseAncestors((node) => {
@@ -213,10 +194,19 @@
             if (hitUI) return; 
           }
 
-          // Depth APIを用いた空間配置
           let intersection = null;
+
+          // 2. Depth APIを用いた空間配置 (Quest 3やAndroid XRなど、Depth対応デバイス向け)
           if (xb.core.depth && xb.core.depth.depthMesh) {
             intersection = xb.user.select(xb.core.depth.depthMesh, controller);
+          }
+          
+          // 3. Depth非対応の場合 (Quest 1など)、仮想の床で判定するフォールバック
+          if (!intersection) {
+            if (intersections && intersections.length > 0) {
+               // XRBlocksが標準で用意している仮想の床(Reticle)の交差を使う
+               intersection = intersections[0];
+            }
           }
           
           if (intersection) {
@@ -230,7 +220,9 @@
         options.enableUI();
         options.enableHands();
         options.reticles.enabled = true;
-        options.depth = new xb.DepthOptions(xb.xrDepthMeshOptions);
+        // Depth Meshを無効にして、古いデバイス(Quest 1)との互換性を高める
+        // Quest 1はDepth API(深度センサーによる空間のメッシュ化)に非対応の可能性が高いため
+        // options.depth = new xb.DepthOptions(xb.xrDepthMeshOptions); 
         
         await xb.init(options);
         
